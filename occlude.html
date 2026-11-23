@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>지지미 가리기 실험기</title>
+<style>
+  body { font-family: "Malgun Gothic", "Apple SD Gothic Neo", sans-serif; max-width: 980px; margin: 0 auto; padding: 20px; color: #222; background: #fafafa; }
+  h1 { font-size: 24px; margin: 0 0 4px; color: #1b5e20; }
+  .muted { color: #666; font-size: 14px; }
+  .box { background: #fff; border: 1px solid #ddd; border-radius: 10px; padding: 12px 14px; margin: 10px 0; }
+  input[type=text] { font-size: 15px; padding: 5px 6px; }
+  select { font-size: 15px; padding: 4px; }
+  button { font-size: 16px; padding: 9px 16px; border-radius: 8px; border: none; background: #2e7d32; color: #fff; cursor: pointer; margin: 4px 6px 4px 0; }
+  button.sub { background: #fff; color: #2e7d32; border: 1.5px solid #2e7d32; }
+  button:disabled { background: #bdbdbd; border-color: #bdbdbd; color: #fff; cursor: default; }
+  .pair { display: flex; gap: 20px; flex-wrap: wrap; align-items: flex-start; }
+  .pair div { text-align: center; }
+  canvas { border-radius: 8px; border: 1px solid #ccc; }
+  table { border-collapse: collapse; background: #fff; font-size: 14px; }
+  th, td { border: 1px solid #ccc; padding: 4px 8px; text-align: center; }
+  th { background: #e8f5e9; }
+</style>
+</head>
+<body>
+  <h1>🔍 지지미 가리기 실험기</h1>
+  <p class="muted">사진의 한 칸을 회색으로 가리고 다시 예측해서, 어디를 가렸을 때 확률이 많이 떨어지는지 봅니다. 많이 떨어진 곳이 모델이 기대는 곳입니다. (Zeiler & Fergus, 2014의 Occlusion Sensitivity)</p>
+
+  <div class="box">
+    링크 <input type="text" id="url" value="https://teachablemachine.withgoogle.com/models/A0pDRXYJl/" style="width:430px">
+    <button id="load">모델 불러오기</button> <span id="status" class="muted"></span>
+  </div>
+
+  <div class="box">
+    사진 <input type="file" id="file" accept="image/*" disabled>
+    &nbsp; 볼 클래스 <select id="cls"></select>
+    &nbsp; 격자 <select id="grid"><option>4</option><option selected>6</option><option>8</option></select>
+    <button id="run" disabled>가리기 실험 실행</button>
+    <button id="png" class="sub" disabled>히트맵 그림 저장</button>
+    <button id="csv" class="sub" disabled>CSV 내려받기</button>
+    <div id="orig" class="muted"></div>
+  </div>
+
+  <div class="pair">
+    <div><b>모델이 보는 사진 (224×224)</b><br><canvas id="base" width="224" height="224" style="width:336px;height:336px"></canvas></div>
+    <div><b>가렸을 때 떨어진 양 (진할수록 많이 떨어짐)</b><br><canvas id="heat" width="448" height="448" style="width:336px;height:336px"></canvas></div>
+  </div>
+  <div id="summary" class="box" style="display:none"></div>
+  <div id="table"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@1.3.1/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@teachablemachine/image@0.8/dist/teachablemachine-image.min.js"></script>
+<script>
+  const $ = id => document.getElementById(id);
+  let model, baseProbs = null, cells = [], fileName = "";
+  const base = $("base"), bctx = base.getContext("2d");
+
+  // 1) 모델 불러오기
+  $("load").addEventListener("click", async () => {
+    let url = $("url").value.trim();
+    if (!url.endsWith("/")) url += "/";
+    $("status").textContent = "불러오는 중...";
+    try {
+      model = await tmImage.load(url + "model.json", url + "metadata.json");
+      $("cls").innerHTML = model.getClassLabels().map(c => `<option>${c}</option>`).join("");
+      $("file").disabled = false;
+      $("status").textContent = "준비됨";
+    } catch (e) { $("status").textContent = "불러오지 못했어요. 링크를 확인해 주세요."; }
+  });
+
+  // 확률 목록에서 한 클래스의 확률 꺼내기
+  const probOf = (preds, c) => preds.find(p => p.className === c).probability;
+
+  // 2) 사진을 고르면 가운데 정사각형으로 잘라 224×224로 그림 (티처블 머신과 같은 방식)
+  $("file").addEventListener("change", e => {
+    const f = e.target.files[0];
+    if (!f) return;
+    fileName = f.name;
+    const img = new Image();
+    img.onload = async () => {
+      const s = Math.min(img.width, img.height);
+      bctx.drawImage(img, (img.width - s) / 2, (img.height - s) / 2, s, s, 0, 0, 224, 224);
+      baseProbs = await model.predict(base);
+      const top = baseProbs.slice().sort((a, b) => b.probability - a.probability)[0];
+      $("cls").value = top.className;  // 볼 클래스를 모델이 예측한 클래스로 맞춤
+      $("orig").innerHTML = "원본 확률: " + baseProbs.map(p => `${p.className} <b>${(p.probability * 100).toFixed(1)}%</b>`).join(" · ");
+      $("run").disabled = false;
+      $("heat").getContext("2d").clearRect(0, 0, 448, 448);
+    };
+    img.src = URL.createObjectURL(f);
+  });
+
+  // 3) 한 칸씩 회색(128)으로 가리고 예측. 떨어진 양 = 원본 확률 − 가린 확률
+  $("run").addEventListener("click", async () => {
+    const n = parseInt($("grid").value), c = $("cls").value, size = 224 / n;
+    const p0 = probOf(baseProbs, c);
+    const tmp = document.createElement("canvas"); tmp.width = tmp.height = 224;
+    const t = tmp.getContext("2d");
+    cells = [];
+    $("run").disabled = true;
+    for (let r = 0; r < n; r++) for (let k = 0; k < n; k++) {
+      t.drawImage(base, 0, 0);
+      t.fillStyle = "rgb(128,128,128)";                 // 회색으로 가리는 줄
+      t.fillRect(k * size, r * size, size, size);
+      const p = probOf(await model.predict(tmp), c);
+      cells.push({ r: r + 1, k: k + 1, p, drop: p0 - p }); // 떨어진 양을 계산하는 줄
+      $("orig").innerHTML = `가리는 중... ${cells.length} / ${n * n}`;
+    }
+    $("run").disabled = false;
+    draw(n, c, p0);
+  });
+
+  // 4) 히트맵: 사진 위에 칸마다 빨간색(떨어진 만큼 진하게)과 숫자를 겹침
+  function draw(n, c, p0) {
+    const h = $("heat").getContext("2d"), size = 448 / n;
+    h.drawImage(base, 0, 0, 448, 448);
+    const maxDrop = Math.max(0.01, ...cells.map(x => x.drop));
+    h.font = "bold 15px sans-serif"; h.textAlign = "center"; h.textBaseline = "middle";
+    cells.forEach(x => {
+      const a = Math.max(0, x.drop) / maxDrop * 0.75;
+      h.fillStyle = `rgba(220,0,0,${a})`;
+      h.fillRect((x.k - 1) * size, (x.r - 1) * size, size, size);
+      h.strokeStyle = "rgba(255,255,255,0.6)";
+      h.strokeRect((x.k - 1) * size, (x.r - 1) * size, size, size);
+      h.fillStyle = "#fff"; h.strokeStyle = "#000"; h.lineWidth = 3;
+      const txt = (x.drop * 100).toFixed(0);
+      h.strokeText(txt, (x.k - 0.5) * size, (x.r - 0.5) * size);
+      h.fillText(txt, (x.k - 0.5) * size, (x.r - 0.5) * size);
+      h.lineWidth = 1;
+    });
+
+    // 가장 많이 떨어진 칸 3개 요약
+    const top3 = cells.slice().sort((a, b) => b.drop - a.drop).slice(0, 3);
+    const avg = cells.reduce((s, x) => s + x.drop, 0) / cells.length;
+    $("orig").innerHTML = `원본 '${c}' 확률 <b>${(p0 * 100).toFixed(1)}%</b> · 칸 숫자는 떨어진 양(%p)`;
+    $("summary").style.display = "block";
+    $("summary").innerHTML = `<b>가장 많이 떨어진 칸 3개</b> (${fileName}, '${c}' 기준)<br>` +
+      top3.map((x, i) => `${i + 1}. ${x.r}행 ${x.k}열: ${(p0 * 100).toFixed(1)}% → ${(x.p * 100).toFixed(1)}% (${(x.drop * 100).toFixed(1)}%p 떨어짐)`).join("<br>") +
+      `<br>칸 평균 ${(avg * 100).toFixed(1)}%p 떨어짐<br><span class="muted">물체 위에서만 떨어짐 = 물체를 보고 판정 · 배경에서 떨어짐 = 지름길 · 어디를 가려도 비슷함 = 전체 색이나 밝기로 판정</span>`;
+
+    // 칸별 확률 표
+    let t = `<table><tr><th>행 \\ 열</th>${[...Array(n)].map((_, i) => `<th>${i + 1}</th>`).join("")}</tr>`;
+    for (let r = 1; r <= n; r++) {
+      t += `<tr><th>${r}</th>` + cells.filter(x => x.r === r).map(x => `<td>${(x.p * 100).toFixed(1)}%</td>`).join("") + `</tr>`;
+    }
+    $("table").innerHTML = "<p class='muted'>칸마다 가렸을 때의 확률</p>" + t + "</table>";
+    $("png").disabled = false; $("csv").disabled = false;
+  }
+
+  // 5) 저장: 히트맵 PNG, 칸별 CSV
+  $("png").addEventListener("click", () => {
+    const a = document.createElement("a");
+    a.href = $("heat").toDataURL("image/png");
+    a.download = "occlude_" + fileName.replace(/\.[^.]+$/, "") + ".png";
+    a.click();
+  });
+  $("csv").addEventListener("click", () => {
+    const body = cells.map(x => [x.r, x.k, x.p.toFixed(4), x.drop.toFixed(4)].join(",")).join("\n");
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob(["﻿행,열,가린확률,떨어진양\n" + body], { type: "text/csv" }));
+    a.download = "occlude_" + fileName.replace(/\.[^.]+$/, "") + ".csv";
+    a.click();
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>지지미 교사용 평가 화면</title>
+<style>
+  body { font-family: "Malgun Gothic", "Apple SD Gothic Neo", sans-serif; max-width: 980px; margin: 0 auto; padding: 20px; color: #222; background: #fafafa; }
+  h1 { font-size: 24px; margin: 0 0 4px; color: #1b5e20; }
+  h2 { font-size: 19px; margin: 26px 0 8px; color: #1b5e20; }
+  .muted { color: #666; font-size: 14px; }
+  .box { background: #fff; border: 1px solid #ddd; border-radius: 10px; padding: 12px 14px; margin: 10px 0; }
+  .row { display: flex; gap: 12px; flex-wrap: wrap; }
+  .row .box { flex: 1; min-width: 260px; }
+  input[type=text], input[type=number] { font-size: 15px; padding: 5px 6px; }
+  button { font-size: 16px; padding: 9px 16px; border-radius: 8px; border: none; background: #2e7d32; color: #fff; cursor: pointer; margin: 4px 6px 4px 0; }
+  button.sub { background: #fff; color: #2e7d32; border: 1.5px solid #2e7d32; }
+  button:disabled { background: #bdbdbd; border-color: #bdbdbd; color: #fff; cursor: default; }
+  table { border-collapse: collapse; background: #fff; font-size: 15px; }
+  th, td { border: 1px solid #ccc; padding: 6px 10px; text-align: center; }
+  th { background: #e8f5e9; }
+  td.diag { background: #c8e6c9; font-weight: bold; }
+  td.off { background: #ffcdd2; font-weight: bold; }
+  tr.pick td { background: #fff9c4; }
+  .big { font-size: 22px; font-weight: bold; }
+  .warn { background: #fff3e0; border: 1.5px solid #ffb74d; border-radius: 8px; padding: 8px 12px; margin: 8px 0; }
+  .thumbs { display: flex; flex-wrap: wrap; gap: 10px; }
+  .thumb { width: 150px; font-size: 13px; background: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 6px; }
+  .thumb img { width: 100%; height: 110px; object-fit: cover; border-radius: 6px; }
+</style>
+</head>
+<body>
+  <h1>🌏 지지미 교사용 평가 화면</h1>
+  <p class="muted">정답을 아는 사진을 넣고 모델이 몇 장을 맞히는지 잽니다. 사진은 이 브라우저 안에서만 쓰이고 저장하거나 보내지 않습니다.</p>
+
+  <!-- 1. 모델 고르기: v0와 v1 링크를 바꿔 넣고 같은 사진으로 다시 잼 -->
+  <div class="box">
+    <b>① 모델</b><br>
+    이름 <input type="text" id="ver" value="v0" style="width:60px">
+    &nbsp;링크 <input type="text" id="url" value="https://teachablemachine.withgoogle.com/models/zOatqryYG/" style="width:430px">
+    <button id="load">모델 불러오기</button>
+    <span id="status" class="muted"></span><br>
+    <button class="sub" id="pickV0">v0 링크 넣기</button>
+    <button class="sub" id="pickV1">v1 링크 넣기</button>
+    <div id="labelInfo" class="muted"></div>
+  </div>
+
+  <!-- 2. 정답별로 사진 넣기 -->
+  <div class="box">
+    <b>② 평가할 사진</b> &nbsp; 묶음 이름 <input type="text" id="setName" value="고정 개발용" style="width:110px">
+    &nbsp; 기준값 <input type="number" id="th" value="0.7" step="0.05" min="0" max="1" style="width:70px">
+    <div class="row">
+      <div class="box"><b>정답: 일회용 비닐봉지</b><br><input type="file" id="f0" accept="image/*" multiple><div id="c0" class="muted">0장</div></div>
+      <div class="box"><b>정답: 다회용 천 장바구니</b><br><input type="file" id="f1" accept="image/*" multiple><div id="c1" class="muted">0장</div></div>
+    </div>
+    <button id="run" disabled>평가 실행</button>
+    <button id="add" class="sub" disabled>비교표에 추가</button>
+    <button id="csv" class="sub" disabled>결과 CSV 내려받기</button>
+    <div class="muted">v0로 재고 '비교표에 추가' → 링크를 v1로 바꿔 '모델 불러오기' → 사진은 그대로 두고 다시 '평가 실행' → '비교표에 추가'</div>
+  </div>
+
+  <div id="out"></div>
+
+  <h2>전후 비교표 (같은 사진으로 잰 숫자)</h2>
+  <div id="compare" class="muted">아직 추가한 결과가 없어요.</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@1.3.1/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@teachablemachine/image@0.8/dist/teachablemachine-image.min.js"></script>
+<script>
+  // 이 화면에서 쓰는 정답 이름 (티처블 머신의 클래스 이름과 같아야 함)
+  const CLASSES = ["일회용 비닐봉지", "다회용 천 장바구니"];
+  let model = null;
+  let names = CLASSES.slice();   // 모델의 클래스 이름 (정답 칸 순서와 맞춤)
+  let rows = [];                 // 사진마다의 예측 결과
+  let lastSummary = null;        // 비교표에 넣을 요약
+  const history = [];            // 비교표
+
+  const $ = id => document.getElementById(id);
+
+  // v0, v1 링크를 한 번에 넣는 버튼 (v0: 직접 찍은 사진만, v1: 중고거래 사진 추가)
+  const LINKS = {
+    v0: "https://teachablemachine.withgoogle.com/models/zOatqryYG/",
+    v1: "https://teachablemachine.withgoogle.com/models/A0pDRXYJl/"
+  };
+  ["v0", "v1"].forEach(v => $("pick" + v.toUpperCase()).addEventListener("click", () => {
+    $("ver").value = v;
+    $("url").value = LINKS[v];
+    $("status").textContent = "'모델 불러오기'를 눌러 주세요";
+    $("run").disabled = true;
+  }));
+  const pct = (a, b) => b ? (a / b * 100).toFixed(1) + "%" : "-";
+
+  // 1) 모델 불러오기. 클래스 이름이 이 화면과 다르면 순서대로 맞추고 알려 줌
+  $("load").addEventListener("click", async () => {
+    let url = $("url").value.trim();
+    if (!url.endsWith("/")) url += "/";
+    $("status").textContent = "불러오는 중...";
+    $("run").disabled = true;
+    try {
+      model = await tmImage.load(url + "model.json", url + "metadata.json");
+      const labels = model.getClassLabels();
+      // v0와 v1의 클래스 이름이 조금 달라서, 이름에 '비닐'이 들어간 쪽을 왼쪽 칸(비닐봉지)으로 맞춤
+      const plastic = labels.find(l => l.includes("비닐"));
+      const bag = labels.find(l => !l.includes("비닐"));
+      if (plastic && bag) {
+        names = [plastic, bag];
+        $("labelInfo").textContent = `모델의 클래스: 왼쪽 칸 = '${plastic}', 오른쪽 칸 = '${bag}'`;
+      } else {
+        names = [labels[0], labels[1]];
+        $("labelInfo").innerHTML = `<div class="warn">클래스 이름에서 '비닐'을 찾지 못해 순서대로 맞춥니다. 왼쪽 칸 = <b>${labels[0]}</b>, 오른쪽 칸 = <b>${labels[1]}</b></div>`;
+      }
+      $("status").textContent = $("ver").value + " 준비됨";
+      $("run").disabled = false;
+    } catch (e) {
+      $("status").textContent = "불러오지 못했어요. 링크를 확인해 주세요.";
+    }
+  });
+
+  ["f0", "f1"].forEach((id, i) => $(id).addEventListener("change", e => {
+    $("c" + i).textContent = e.target.files.length + "장";
+  }));
+
+  function loadImg(file) {
+    return new Promise(res => {
+      const img = new Image();
+      img.onload = () => res(img);
+      img.onerror = () => res(null);
+      img.src = URL.createObjectURL(file);
+    });
+  }
+
+  // 2) 사진마다 한 번씩 예측해서 정답과 함께 저장
+  $("run").addEventListener("click", async () => {
+    rows = [];
+    $("run").disabled = true;
+    const total = $("f0").files.length + $("f1").files.length;
+    let done = 0;
+    for (let t = 0; t < 2; t++) {
+      for (const f of $("f" + t).files) {
+        const img = await loadImg(f);
+        if (!img) continue;
+        const preds = await model.predict(img);
+        preds.sort((a, b) => b.probability - a.probability);
+        rows.push({ file: f.name, src: img.src, truth: names[t], pred: preds[0].className, prob: preds[0].probability });
+        done++;
+        $("out").innerHTML = `<p>평가 중... ${done} / ${total}</p>`;
+      }
+    }
+    $("run").disabled = false;
+    render();
+  });
+
+  // 기준값 하나에서의 결과 (답한 것, 맞은 것, 잘 모르겠어요 등)
+  function atThreshold(th) {
+    const answered = rows.filter(r => r.prob >= th);
+    const ok = answered.filter(r => r.pred === r.truth).length;
+    const unsure = rows.filter(r => r.prob < th);
+    return {
+      th, answered: answered.length, ok, wrong: answered.length - ok,
+      unsure: unsure.length, unsureOk: unsure.filter(r => r.pred === r.truth).length
+    };
+  }
+
+  // 3) 결과 그리기: 전체, 클래스별, 혼동행렬, 기준값, 기준값별 표, 틀린 사진
+  function render() {
+    const N = rows.length;
+    const correct = rows.filter(r => r.pred === r.truth).length;
+    // 혼동행렬 cm[정답][예측]
+    const cm = names.map(t => names.map(p => rows.filter(r => r.truth === t && r.pred === p).length));
+    const perClass = names.map((t, i) => ({ name: t, ok: cm[i][i], n: cm[i].reduce((a, b) => a + b, 0) }));
+    const th = parseFloat($("th").value);
+    const T = atThreshold(th);
+
+    let h = `<h2>결과: ${$("ver").value} · ${$("setName").value} ${N}장</h2>`;
+    h += `<div class="box"><span class="big">${$("setName").value} ${N}장 중 ${correct}장 맞음 (${pct(correct, N)})</span><br>`;
+    h += perClass.map(c => `${c.name}: ${c.ok} / ${c.n}`).join(" &nbsp;·&nbsp; ") + `</div>`;
+
+    h += `<h2>혼동행렬 (줄: 정답, 칸: 모델의 답)</h2><table><tr><th>정답 \\ 예측</th>${names.map(n => `<th>${n}</th>`).join("")}<th>합</th></tr>`;
+    names.forEach((t, i) => {
+      h += `<tr><th>${t}</th>${cm[i].map((v, j) => `<td class="${i === j ? "diag" : (v ? "off" : "")}">${v}</td>`).join("")}<td>${perClass[i].n}</td></tr>`;
+    });
+    h += `</table>`;
+
+    h += `<h2>기준값 ${th}에서</h2><div class="box">답한 사진 <b>${T.answered}장</b>, 그중 맞은 사진 <b>${T.ok}장</b> (${pct(T.ok, T.answered)}), 틀린 답 <b>${T.wrong}장</b><br>
+          '잘 모르겠어요' <b>${T.unsure}장</b> (그중 원래 판정은 맞았을 사진 ${T.unsureOk}장)</div>`;
+
+    // 기준값별 표 (11주차 형식)
+    h += `<h2>기준값별 표</h2><table><tr><th>기준값</th><th>답한 사진</th><th>답한 비율</th><th>맞은 사진</th><th>정확도</th><th>틀린 답</th><th>모르겠어요</th><th>그중 맞았을</th></tr>`;
+    for (let x = 0.5; x <= 0.951; x += 0.05) {
+      const r = atThreshold(+x.toFixed(2));
+      h += `<tr class="${Math.abs(x - th) < 0.001 ? "pick" : ""}"><td><b>${x.toFixed(2)}</b></td><td>${r.answered}</td><td>${pct(r.answered, N)}</td><td>${r.ok}</td><td>${pct(r.ok, r.answered)}</td><td>${r.wrong}</td><td>${r.unsure}</td><td>${r.unsureOk}</td></tr>`;
+    }
+    h += `</table><p class="muted">노란 줄이 지금 기준값. 목표(예: 답한 것의 정확도 95% 이상)를 넘는 가장 낮은 값을 고르면 '잘 모르겠어요'가 가장 적게 나옴.</p>`;
+
+    // 틀린 사진 모음
+    const wrong = rows.filter(r => r.pred !== r.truth);
+    h += `<h2>틀린 사진 ${wrong.length}장</h2><div class="thumbs">`;
+    h += wrong.map(r => `<div class="thumb"><img src="${r.src}"><br>${r.file}<br>정답: ${r.truth}<br>답: <b>${r.pred}</b> ${(r.prob * 100).toFixed(0)}%</div>`).join("") || "<span class='muted'>없음</span>";
+    h += `</div>`;
+
+    // '잘 모르겠어요'가 나온 사진 (시연용 사진 고를 때 참고)
+    const uns = rows.filter(r => r.prob < th);
+    h += `<h2>'잘 모르겠어요'가 나온 사진 ${uns.length}장 (기준값 ${th})</h2><div class="thumbs">`;
+    h += uns.map(r => `<div class="thumb"><img src="${r.src}"><br>${r.file}<br>정답: ${r.truth}<br>답: ${r.pred} ${(r.prob * 100).toFixed(0)}%</div>`).join("") || "<span class='muted'>없음</span>";
+    h += `</div>`;
+    $("out").innerHTML = h;
+
+    lastSummary = { ver: $("ver").value, set: $("setName").value, N, correct, perClass, cm, T };
+    $("add").disabled = false;
+    $("csv").disabled = false;
+  }
+
+  // 기준값을 바꾸면 다시 예측하지 않고 표만 다시 그림
+  $("th").addEventListener("change", () => { if (rows.length) render(); });
+
+  // 4) 비교표: v0와 v1을 같은 사진으로 잰 결과를 나란히
+  $("add").addEventListener("click", () => {
+    if (!lastSummary) return;
+    history.push(lastSummary);
+    let h = `<table><tr><th>모델</th><th>사진</th><th>전체 맞음</th><th>비닐봉지 맞음</th><th>장바구니 맞음</th>
+             <th>비닐→장바구니로 틀림</th><th>장바구니→비닐로 틀림</th><th>기준값</th><th>답함 / 틀림 / 모르겠어요</th></tr>`;
+    history.forEach(s => {
+      h += `<tr><td><b>${s.ver}</b></td><td>${s.set} ${s.N}장</td><td>${s.correct} / ${s.N} (${pct(s.correct, s.N)})</td>
+            ${s.perClass.map(c => `<td>${c.ok} / ${c.n}</td>`).join("")}
+            <td>${s.cm[0][1]}</td><td>${s.cm[1][0]}</td><td>${s.T.th}</td><td>${s.T.answered} / ${s.T.wrong} / ${s.T.unsure}</td></tr>`;
+    });
+    $("compare").innerHTML = h + `</table>`;
+  });
+
+  // 5) CSV 내려받기 (엑셀에서 한글이 깨지지 않게 BOM 붙임)
+  $("csv").addEventListener("click", () => {
+    const th = parseFloat($("th").value);
+    const head = "모델,파일명,정답,예측,최대확률,맞음,잘모르겠어요\n";
+    const body = rows.map(r => [$("ver").value, r.file, r.truth, r.pred, r.prob.toFixed(3),
+      r.pred === r.truth ? "예" : "아니오", r.prob < th ? "예" : "아니오"].join(",")).join("\n");
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob(["﻿" + head + body], { type: "text/csv" }));
+    a.download = `eval_${$("ver").value}.csv`;
+    a.click();
+  });
+</script>
+</body>
+</html>
